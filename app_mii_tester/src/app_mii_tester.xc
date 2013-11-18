@@ -228,7 +228,8 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,chanend c_tx_to_t
       c_data_handler_to_tx :> size_in_bytes;
       c_data_handler_to_tx :> checksum;
     }
-    memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
+
+    data_buff[size_in_bytes] = checksum;
 
     t :> tx_ticks;
     /**< when a tx cmd come from tx_to_app then send it out */
@@ -295,13 +296,12 @@ void data_handler(server interface xscope_config i_xscope_config,chanend c_data_
         if( (!buff_access_flag) && (!eop_flag) ){
           buff_access_flag = 1;
 
-          packet_number = (xscope_buff[0] % END_OF_PACKET_SEQUENCE);
+          packet_number = ((xscope_buff[0] >> 26 )% END_OF_PACKET_SEQUENCE);
 
-          assert(packet_number < MAX_PACKET_SEQUENCE);
           packet_control[packet_number].packet_number = packet_number;
-          packet_control[packet_number].frame_delay = xscope_buff[1];
-          packet_control[packet_number].frame_size = xscope_buff[2];
-          packet_control[packet_number].frame_crc = xscope_buff[3];
+          packet_control[packet_number].frame_delay = ((xscope_buff[0] >> 11)&0x7FFF);
+          packet_control[packet_number].frame_size = (xscope_buff[0] & 0x7FF);
+          packet_control[packet_number].frame_crc = xscope_buff[1];
 
           if(xscope_buff[0] & END_OF_PACKET_SEQUENCE) {
               frames_tobe_sent = packet_number+1;      /**< Added '1' since packet number always starts with '0' */
@@ -309,21 +309,25 @@ void data_handler(server interface xscope_config i_xscope_config,chanend c_data_
           }
 
           buff_access_flag = 0;
+          xscope_int(0, 1);
         }
-        else
+        else {
           debug_printf("Frame Arrived During buffer handling or During Tx\n");
-
+          xscope_int(0, 1);
+        }
         break;
       }
 
       eop_flag => default:
           unsigned frames_send = 0;
+          eop_flag = 0;
           while(frames_send < frames_tobe_sent){
             master {
                 c_data_handler_to_tx <: packet_control[frames_send].frame_delay;
                 c_data_handler_to_tx <: packet_control[frames_send].frame_size;
                 c_data_handler_to_tx <: packet_control[frames_send].frame_crc;
             }
+
             c_data_handler_to_tx :> unsigned temp;
             frames_send+=1;
           }
@@ -351,13 +355,11 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
       case xscope_data_from_host(c_host_data, (unsigned char *)xscope_buff, num_byte_read): {
         if(num_byte_read != 0) {
             i_xscope_config.put_buffer(&xscope_buff[0]);
-            xscope_int(0, data_gen_ack);
         }
         break;
       }
 
     }
-    //xscope_int(0, data_gen_ack);
   }
 }
 /*
@@ -371,10 +373,12 @@ int main(void) {
   chan c_rx_to_timestamp;
   interface xscope_config i_xscope_config;
   par {
-    //xscope_host_data(c_host_data);
+    xscope_host_data(c_host_data);
+    on tile [0]: xscope_listener(c_host_data,i_xscope_config);
+
     on tile [1]: time_stamp(c_tx_to_timestamp,c_rx_to_timestamp);
     on tile [1]: data_handler(i_xscope_config,c_data_handler_to_tx);
-    on tile [1]: xscope_listener(c_host_data,i_xscope_config);
+
 
     on tile [1]: {
       //set_core_fast_mode_on();

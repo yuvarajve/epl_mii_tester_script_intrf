@@ -120,26 +120,29 @@ int send_packet(int sockfd,unsigned char pkt_no)
   unsigned int delay = get_random_ifg_delay();
   unsigned int num_data_bytes = get_random_packet_size();
   unsigned char pBuffer[MAX_BYTES_CAN_SEND] = {0};
+  unsigned int timeout = 0;
 
   packet_control_t packet_control;
 
   assert((num_data_bytes >= MIN_FRAME_SIZE) && (num_data_bytes <= MAX_FRAME_SIZE));
 
-  packet_control.packet_number  = pkt_no;
-  packet_control.frame_delay    = delay;
-  packet_control.frame_size     = num_data_bytes-CRC_BYTES;
+  packet_control.frame_info  = ((pkt_no & 0x3F) << 26);
+  packet_control.frame_info |= ((delay & 0x7FFF) << 11);
+  packet_control.frame_info |= ((num_data_bytes-CRC_BYTES) & 0x7FF);
 
-  for(idx = 0; idx < packet_control.frame_size; idx++){
+  for(idx = 0; idx < (num_data_bytes-CRC_BYTES); idx++){
     crc_value = crc8(crc_value, packet_data[idx]);
   }		
   
   packet_control.frame_crc = crc_value;
 
   memcpy(pBuffer,(unsigned char *)&packet_control,PKT_CTRL_BYTES);
-  while(xscope_ep_request_upload(sockfd, PKT_CTRL_BYTES,pBuffer) != XSCOPE_EP_SUCCESS)
+  while((xscope_ep_request_upload(sockfd, PKT_CTRL_BYTES,pBuffer) != XSCOPE_EP_SUCCESS) && (timeout++ < 0x7FFFFF))
   	; // wait till we get success
   
-  printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(packet_control.packet_number%END_OF_PACKET_SEQUENCE)+1,packet_control.frame_delay,packet_control.frame_size,packet_control.frame_crc);
+  assert(timeout < 0x7FFFF);
+  Sleep(30);
+  printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(pkt_no%END_OF_PACKET_SEQUENCE)+1,delay,(num_data_bytes-CRC_BYTES),packet_control.frame_crc);
   
   return 0;
 }
@@ -162,14 +165,16 @@ void *packet_generation_thread(void *arg)
 
   srand(time(0)); //initialize the seed
   
-  printf("+-------------------------------------+\n");
-  printf("| ## | TxDelay | PktSize |  Checksum  |\n");
-  printf("+-------------------------------------+\n");
+  printf("+--------------------------------------------------------------------------------+\n");
+  printf("|       FROM  HOST  APPLICATION       |  FROM XCORE MII TESTER APPLICATION       |\n");
+  printf("+-------------------------------------+------------------------------------------+\n");
+  printf("| ## | TxDelay | PktSize |  Checksum  |                                          |\n");
+  printf("+-------------------------------------+------------------------------------------+\n");
 	
   while(1) {
     //sleep(1);
     // get random packet number
-    no_of_packets = get_random_packets();  
+    no_of_packets = get_random_packets(); 	
     // always send no of packets less than '1', on last packet number add END_OF_PACKET
     for(loop=0; loop < no_of_packets-1; loop++)
     {

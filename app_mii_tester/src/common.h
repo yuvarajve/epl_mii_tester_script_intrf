@@ -10,7 +10,7 @@
 #define MIN_FRAME_SIZE          64
 #define MAX_FRAME_SIZE          1522
 #define LAST_FRAME              (1<<7)
-#define END_OF_PACKET_SEQUENCE  (3<<6)
+#define END_OF_PACKET_SEQUENCE  (1<<5)
 #define MAX_BUFFER_WORDS  ((MAX_FRAME_SIZE+3)>>2)
 
 typedef enum {

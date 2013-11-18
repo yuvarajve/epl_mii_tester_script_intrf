@@ -20,25 +20,21 @@
 #define MAX_IFG_BYTES          1250     // 
 #define LAST_FRAME             (1<<7)
 #define MAX_BYTES_CAN_SEND     256
-#define END_OF_PACKET_SEQUENCE (3<<6)
+#define END_OF_PACKET_SEQUENCE (1<<5)
 
 /* The entire Ethernet Packet Sequence and sent from host 
-* +------------------------------------------------------------------+
-* |  packet_number  |  frame_id  |  frame_len  |         data        |
-* +------------------------------------------------------------------+
-* CRC32          :    4 --+ --> data
-* packet size    :    4   |
-* packet delay   :    4 --+
-* packet number  :    1
-* frame id       :    1
-* frame length   :    2
+* +------------------------------------------------------+
+* | packet_number | frame_delay | frame_size | frame_crc |
+* +------------------------------------------------------+
+* packet_number : 6-bits  ---+
+* frame_delay   : 15-bits    | -> 32-bits
+* frame_size    : 11-bits ---+
+* frame_crc     : 32-bit  
 */
 
 // packet control
 typedef struct packet_control{
-  unsigned int packet_number;  
-  unsigned int frame_delay;
-  unsigned int frame_size;
+  unsigned int frame_info;
   unsigned int frame_crc;
 }packet_control_t;
 
