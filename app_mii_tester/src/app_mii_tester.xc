@@ -14,6 +14,7 @@
 
 #define XSCOPE_TILE     0
 #define ETHERNET_TILE   1
+#define TX_1_ENABLED    1
 
 #define PORT_ETH_RXCLK_0 on tile[1]: XS1_PORT_1B
 #define PORT_ETH_RXD_0 on tile[1]: XS1_PORT_4A
@@ -144,7 +145,7 @@ static void tx_init(mii_tx_ports_t &p) {
 /*
  *
  */
-void rx(in buffered port:32 rxd, in port rxdv, chanend c_rx_to_timestamp)
+void rx(in buffered port:32 rxd, in port rxdv, streaming chanend c_rx_to_timestamp)
 {
   timer t;
   unsigned buffer[MAX_BUFFER_WORDS];
@@ -156,7 +157,6 @@ void rx(in buffered port:32 rxd, in port rxdv, chanend c_rx_to_timestamp)
     unsigned rx_ticks = 0;
     unsigned checksum = 0;
 
-    rxdv when pinseq(1) :> int;
     rxd when pinseq(ETH_SFD) :> int;
 
     t :> rx_ticks;
@@ -198,7 +198,8 @@ void rx(in buffered port:32 rxd, in port rxdv, chanend c_rx_to_timestamp)
 /*
  *
  */
-void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,chanend c_tx_to_timestamp)
+void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,
+        streaming chanend c_tx_to_timestamp)
 {
   unsigned tx_ticks;
   unsigned char data_buff[1522];
@@ -265,10 +266,10 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,chanend c_tx_to_t
 /*
  *
  */
-void time_stamp(chanend c_rx_to_timestamp,chanend c_tx_to_timestamp)
+void time_stamp(streaming chanend c_tx_to_timestamp, streaming chanend c_rx_to_timestamp)
 {
   unsigned time_stamp_flag_l = 0,time_stamp_flag_t = 0,no_pkt_flag=0;
-  unsigned tx_ticks,rx_ticks,start_ticks,stop_ticks,byte_count;
+  unsigned tx_ticks,rx_ticks,start_ticks,byte_count;
   unsigned no_pkt_send = 0, no_pkt_rxcd = 0;
 
   while(1) {
@@ -285,10 +286,6 @@ void time_stamp(chanend c_rx_to_timestamp,chanend c_tx_to_timestamp)
         break;
 
       case c_rx_to_timestamp :> rx_ticks: {
-        //Ignore spurious stops
-        if(!time_stamp_flag_l)
-            break;
-
         c_rx_to_timestamp :> byte_count;
         no_pkt_rxcd++;
 
@@ -299,14 +296,13 @@ void time_stamp(chanend c_rx_to_timestamp,chanend c_tx_to_timestamp)
         }
 
         const int preamble = 64;
-        stop_ticks = rx_ticks-preamble-(byte_count*8);
+        int stop_ticks = rx_ticks-preamble-(byte_count*8);
 
         if(stop_ticks > start_ticks)
           printuintln(stop_ticks-start_ticks);
         else
           printuintln((0xFFFFFFFF-start_ticks)+stop_ticks);
 
-        time_stamp_flag_l = 0;
         start_ticks = rx_ticks;
         if(no_pkt_rxcd == no_pkt_send) {
            time_stamp_flag_t = 0;
@@ -319,7 +315,8 @@ void time_stamp(chanend c_rx_to_timestamp,chanend c_tx_to_timestamp)
     }
   }
 }
-void data_handler(server interface xscope_config i_xscope_config,chanend c_data_handler_to_tx)
+void data_handler(server interface xscope_config i_xscope_config,
+                  chanend c_data_handler_to_tx_0,chanend c_data_handler_to_tx_1)
 {
   packet_control_t packet_control[MAX_PACKET_SEQUENCE];
   int eop_flag = 0;
@@ -357,16 +354,23 @@ void data_handler(server interface xscope_config i_xscope_config,chanend c_data_
 
       eop_flag => default:
           unsigned frames_send = 0;
-
-          c_data_handler_to_tx <: frames_tobe_sent;
+          c_data_handler_to_tx_0 <: frames_tobe_sent;
+#ifdef TX_1_ENABLED
+          c_data_handler_to_tx_1 <: frames_tobe_sent;
+#endif
           do{
             master {
-                c_data_handler_to_tx <: packet_control[frames_send].frame_delay;
-                c_data_handler_to_tx <: packet_control[frames_send].frame_size;
-                c_data_handler_to_tx <: packet_control[frames_send].frame_crc;
+                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_delay;
+                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_size;
+                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_crc;
             }
-
-            //c_data_handler_to_tx :> unsigned temp;
+#ifdef TX_1_ENABLED
+            master {
+                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_delay;
+                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_size;
+                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_crc;
+            }
+#endif
             frames_send++;
           }while(frames_send < frames_tobe_sent);
           eop_flag = 0;
@@ -406,39 +410,52 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
 int main(void) {
 
   chan c_host_data;
-  chan c_data_handler_to_tx;
-  chan c_tx_to_timestamp;
-  chan c_rx_to_timestamp;
-  interface xscope_config i_xscope_config;
+  chan c_data_handler_to_tx_0;
+  chan c_data_handler_to_tx_1;
+
   par {
     xscope_host_data(c_host_data);
-    on tile [0]: xscope_listener(c_host_data,i_xscope_config);
-
-    on tile [1]: time_stamp(c_rx_to_timestamp,c_tx_to_timestamp);
-    on tile [1]: data_handler(i_xscope_config,c_data_handler_to_tx);
-
-
-    on tile [1]: {
-      //set_core_fast_mode_on();
-      rx_init(rx1);
-      rx(rx1.rxd, rx1.rxdv, c_rx_to_timestamp);  /**< Receive Frames on circle slot */
+    on tile [XSCOPE_TILE]: {
+      interface xscope_config i_xscope_config;
+      set_core_fast_mode_on();
+      par {
+          data_handler(i_xscope_config,c_data_handler_to_tx_0,c_data_handler_to_tx_1);
+          xscope_listener(c_host_data,i_xscope_config);
+      }
     }
-    on tile [1]: {
-      //set_core_fast_mode_on();
+
+    on tile [ETHERNET_TILE]: {
+      streaming chan c_tx_0_to_timestamp;
+      streaming chan c_tx_1_to_timestamp;
+      streaming chan c_rx_0_to_timestamp;
+      streaming chan c_rx_1_to_timestamp;
+
+      set_core_fast_mode_on();
       smi_init(smi0);
+      smi_init(smi1);
       tx_init(tx0);
-      tx(tx0.txd,c_data_handler_to_tx,c_tx_to_timestamp);            /**< Transmit Frames on square slot */
+      tx_init(tx1);
+      rx_init(rx0);
+      rx_init(rx1);
+      par {
+          tx(tx0.txd,c_data_handler_to_tx_0,c_tx_0_to_timestamp);   /**< Transmit Frames on square slot */
+          rx(rx1.rxd, rx1.rxdv, c_rx_1_to_timestamp);               /**< Receive Frames on circle slot */
+          tx(tx1.txd,c_data_handler_to_tx_1,c_tx_1_to_timestamp);   /**< Transmit Frames on circle slot */
+          rx(rx0.rxd, rx0.rxdv, c_rx_0_to_timestamp);               /**< Receive Frames on square slot */
+          time_stamp(c_tx_0_to_timestamp,c_rx_1_to_timestamp);
+          time_stamp(c_tx_1_to_timestamp,c_rx_0_to_timestamp);
+      }
     }
 
     on tile[1]: {
-          timer t;
-          int x;
-          for (int i = 0; i < 200; i++) {
-            t :> x;
-            t when timerafter(x+100000) :> x;
-            xscope_int(0, 1);
-          }
-        }
+      timer t;
+      int x;
+      for (int i = 0; i < 200; i++) {
+        t :> x;
+        t when timerafter(x+100000) :> x;
+        xscope_int(0, i);
+       }
+     }
   }
 
   return 0;
