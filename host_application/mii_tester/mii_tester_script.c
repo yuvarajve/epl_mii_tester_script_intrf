@@ -29,7 +29,6 @@ int g_i = 0;
 int g_started = 0;
 void hook_data_received(void *data, int data_len)
 {
-//  printf("Received data %d\n", g_i);
   g_i++;
   xscope_ep_upload_pending = 0;
   if (g_i == 199)
@@ -249,8 +248,7 @@ int main(int argc, char *argv[])
   if (err != 0)
     print_and_exit("ERROR: Failed to create packet generation thread\n");
 #endif
-//  sleep(3);
-//  printf("Started\n");
+
   handle_socket(sockfd);
 
   return 0;

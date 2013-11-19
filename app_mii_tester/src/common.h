@@ -11,7 +11,8 @@
 #define MAX_FRAME_SIZE          1522
 #define LAST_FRAME              (1<<7)
 #define END_OF_PACKET_SEQUENCE  (1<<5)
-#define MAX_BUFFER_WORDS  ((MAX_FRAME_SIZE+3)>>2)
+#define MAX_BUFFER_WORDS        ((MAX_FRAME_SIZE+3)>>2)
+#define GET_PACKET_NO(x)        ((x>>26) & 0x3F)
 
 typedef enum {
   EVENT_WAIT,
@@ -33,7 +34,6 @@ typedef enum {
 
 // packet control
 typedef struct packet_control{
-  unsigned int packet_number;
   unsigned int frame_delay;
   unsigned int frame_size;
   unsigned int frame_crc;

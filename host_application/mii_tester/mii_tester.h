@@ -18,7 +18,6 @@
 #define PKT_SIZE_BYTES         sizeof(unsigned int)
 #define MIN_IFG_BYTES          12       // Caution: Don't go below this
 #define MAX_IFG_BYTES          1250     // 
-#define LAST_FRAME             (1<<7)
 #define MAX_BYTES_CAN_SEND     256
 #define END_OF_PACKET_SEQUENCE (1<<5)
 

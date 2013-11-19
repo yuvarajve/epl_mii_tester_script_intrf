@@ -88,7 +88,7 @@ on tile[1] : mii_tx_ports_t tx1 = {
 };
 
 void xscope_user_init(void) {
-  xscope_register(1, XSCOPE_CONTINUOUS, "ack", XSCOPE_UINT, "ack");
+  xscope_register(1,XSCOPE_CONTINUOUS, "ack", XSCOPE_UINT, "ack");
   xscope_config_io(XSCOPE_IO_BASIC);
 }
 
@@ -160,8 +160,7 @@ void rx(in buffered port:32 rxd, in port rxdv, chanend c_rx_to_timestamp)
     rxd when pinseq(ETH_SFD) :> int;
 
     t :> rx_ticks;
-
-    c_rx_to_timestamp <: rx_ticks;
+    c_rx_to_timestamp <: rx_ticks;   //start/stop timestamp
 
     while(!end_of_frame) {
       select {
@@ -188,6 +187,7 @@ void rx(in buffered port:32 rxd, in port rxdv, chanend c_rx_to_timestamp)
             checksum = buffer[word_count-1];
           }
 
+          c_rx_to_timestamp <: byte_count;
           end_of_frame = 1;
           break;
         } /**< rxdv low */
@@ -217,10 +217,15 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,chanend c_tx_to_t
   asm volatile("mov %0, %1": "=r"(dptr):"r"(data_buff));
 
   while(1) {
+    unsigned no_of_packets;
 
-    unsigned wait_time = 1000;
-    unsigned size_in_bytes = 1292;
-    unsigned checksum = 0xD323E598;
+    c_data_handler_to_tx :> no_of_packets;
+    c_tx_to_timestamp <: no_of_packets;
+
+    while(no_of_packets--) {
+    unsigned wait_time = 0;
+    unsigned size_in_bytes = 0;
+    unsigned checksum = 0;
     unsigned data;
 
     slave {
@@ -253,29 +258,62 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,chanend c_tx_to_t
       partout(txd, tailllen, data);
     }
 
-    c_data_handler_to_tx <: HOST_CMD_TX_ACK;
+    //c_data_handler_to_tx <: HOST_CMD_TX_ACK;
+  }
   }
 }
 /*
  *
  */
-void time_stamp(chanend c_tx_to_timestamp,chanend c_rx_to_timestamp)
+void time_stamp(chanend c_rx_to_timestamp,chanend c_tx_to_timestamp)
 {
-  unsigned time_stamp_flag = 0;
-  unsigned start_ticks,stop_ticks;
+  unsigned time_stamp_flag_l = 0,time_stamp_flag_t = 0,no_pkt_flag=0;
+  unsigned tx_ticks,rx_ticks,start_ticks,stop_ticks,byte_count;
+  unsigned no_pkt_send = 0, no_pkt_rxcd = 0;
 
   while(1) {
     select {
 
-      case c_tx_to_timestamp :> start_ticks:
-        time_stamp_flag = 1;
+      case c_tx_to_timestamp :> tx_ticks:
+          //First tx_ticks is no_pkt_send
+          if(!no_pkt_flag) {
+              no_pkt_send = tx_ticks;
+              no_pkt_flag = 1;
+              break;
+          }
+          time_stamp_flag_l = 1;
         break;
 
-      case c_rx_to_timestamp :> stop_ticks: {
-        // Ignore spurious stop
-        if (!time_stamp_flag)
-          break;
-        time_stamp_flag = 0;
+      case c_rx_to_timestamp :> rx_ticks: {
+        //Ignore spurious stops
+        if(!time_stamp_flag_l)
+            break;
+
+        c_rx_to_timestamp :> byte_count;
+        no_pkt_rxcd++;
+
+        if(!time_stamp_flag_t) {
+            start_ticks = rx_ticks;
+            time_stamp_flag_t = 1;
+            break;
+        }
+
+        const int preamble = 64;
+        stop_ticks = rx_ticks-preamble-(byte_count*8);
+
+        if(stop_ticks > start_ticks)
+          printuintln(stop_ticks-start_ticks);
+        else
+          printuintln((0xFFFFFFFF-start_ticks)+stop_ticks);
+
+        time_stamp_flag_l = 0;
+        start_ticks = rx_ticks;
+        if(no_pkt_rxcd == no_pkt_send) {
+           time_stamp_flag_t = 0;
+           no_pkt_flag = 0;
+           no_pkt_rxcd = 0;
+
+        }
         break;
       }
     }
@@ -296,14 +334,13 @@ void data_handler(server interface xscope_config i_xscope_config,chanend c_data_
         if( (!buff_access_flag) && (!eop_flag) ){
           buff_access_flag = 1;
 
-          packet_number = ((xscope_buff[0] >> 26 )% END_OF_PACKET_SEQUENCE);
+          packet_number = (GET_PACKET_NO(xscope_buff[0]) % END_OF_PACKET_SEQUENCE);
 
-          packet_control[packet_number].packet_number = packet_number;
           packet_control[packet_number].frame_delay = ((xscope_buff[0] >> 11)&0x7FFF);
           packet_control[packet_number].frame_size = (xscope_buff[0] & 0x7FF);
           packet_control[packet_number].frame_crc = xscope_buff[1];
 
-          if(xscope_buff[0] & END_OF_PACKET_SEQUENCE) {
+          if( (!eop_flag) && (GET_PACKET_NO(xscope_buff[0]) & END_OF_PACKET_SEQUENCE)) {
               frames_tobe_sent = packet_number+1;      /**< Added '1' since packet number always starts with '0' */
               eop_flag = 1;
           }
@@ -320,17 +357,18 @@ void data_handler(server interface xscope_config i_xscope_config,chanend c_data_
 
       eop_flag => default:
           unsigned frames_send = 0;
-          eop_flag = 0;
-          while(frames_send < frames_tobe_sent){
+
+          c_data_handler_to_tx <: frames_tobe_sent;
+          do{
             master {
                 c_data_handler_to_tx <: packet_control[frames_send].frame_delay;
                 c_data_handler_to_tx <: packet_control[frames_send].frame_size;
                 c_data_handler_to_tx <: packet_control[frames_send].frame_crc;
             }
 
-            c_data_handler_to_tx :> unsigned temp;
-            frames_send+=1;
-          }
+            //c_data_handler_to_tx :> unsigned temp;
+            frames_send++;
+          }while(frames_send < frames_tobe_sent);
           eop_flag = 0;
        break;
 
@@ -376,7 +414,7 @@ int main(void) {
     xscope_host_data(c_host_data);
     on tile [0]: xscope_listener(c_host_data,i_xscope_config);
 
-    on tile [1]: time_stamp(c_tx_to_timestamp,c_rx_to_timestamp);
+    on tile [1]: time_stamp(c_rx_to_timestamp,c_tx_to_timestamp);
     on tile [1]: data_handler(i_xscope_config,c_data_handler_to_tx);
 
 
