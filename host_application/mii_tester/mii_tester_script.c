@@ -141,7 +141,7 @@ int send_packet(int sockfd,unsigned char pkt_no)
   
   assert(timeout < 0x7FFFF);
   Sleep(30);
-  printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(pkt_no%END_OF_PACKET_SEQUENCE)+1,delay,(num_data_bytes-CRC_BYTES),packet_control.frame_crc);
+  //printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(pkt_no%END_OF_PACKET_SEQUENCE)+1,delay,(num_data_bytes-CRC_BYTES),packet_control.frame_crc);
   
   return 0;
 }
@@ -164,16 +164,17 @@ void *packet_generation_thread(void *arg)
 
   srand(time(0)); //initialize the seed
   
-  printf("+--------------------------------------------------------------------------------+\n");
-  printf("|       FROM  HOST  APPLICATION       |  FROM XCORE MII TESTER APPLICATION       |\n");
-  printf("+-------------------------------------+------------------------------------------+\n");
-  printf("| ## | TxDelay | PktSize |  Checksum  |                                          |\n");
-  printf("+-------------------------------------+------------------------------------------+\n");
+  //printf("+--------------------------------------------------------------------------------+\n");
+  //printf("|       FROM  HOST  APPLICATION       |  FROM XCORE MII TESTER APPLICATION       |\n");
+  //printf("+-------------------------------------+------------------------------------------+\n");
+  //printf("| ## | TxDelay | PktSize |  Checksum  |                                          |\n");
+  //printf("+-------------------------------------+------------------------------------------+\n");
 	
   while(1) {
-    //sleep(1);
+    
     // get random packet number
     no_of_packets = get_random_packets(); 	
+	printf("no_of_packets: %d\n",no_of_packets);
     // always send no of packets less than '1', on last packet number add END_OF_PACKET
     for(loop=0; loop < no_of_packets-1; loop++)
     {
@@ -189,6 +190,8 @@ void *packet_generation_thread(void *arg)
       printf("send_packet : Failed !!\n");
 	  
     printf("\n");
+	Sleep(1000);
+	
   }
   return 0;
 

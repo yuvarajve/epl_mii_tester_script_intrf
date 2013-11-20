@@ -6,6 +6,7 @@
 #define CRC_BYTES               (sizeof(unsigned int))
 #define PKT_DELAY_BYTES         (sizeof(unsigned int))
 #define PKT_SIZE_BYTES          (sizeof(unsigned int))
+#define MIN_IFG_BYTES           12       //Shouldn't go below this
 #define MAX_PACKET_SEQUENCE     20
 #define MIN_FRAME_SIZE          64
 #define MAX_FRAME_SIZE          1522
@@ -13,6 +14,8 @@
 #define END_OF_PACKET_SEQUENCE  (1<<5)
 #define MAX_BUFFER_WORDS        ((MAX_FRAME_SIZE+3)>>2)
 #define GET_PACKET_NO(x)        ((x>>26) & 0x3F)
+#define GET_FRAME_DELAY(x)      ((x >> 11)&0x7FFF)
+#define GET_FRAME_SIZE(x)       (x & 0x7FF)
 
 typedef enum {
   EVENT_WAIT,
@@ -28,9 +31,9 @@ typedef enum {
 }rx_to_app_t;
 
 typedef enum {
-  HOST_CMD_TX,
-  HOST_CMD_TX_ACK,
-} host_to_app_t;
+  TX_0_INTRF,
+  TX_1_INTRF
+} tx_interface_t;
 
 // packet control
 typedef struct packet_control{
@@ -38,6 +41,14 @@ typedef struct packet_control{
   unsigned int frame_size;
   unsigned int frame_crc;
 }packet_control_t;
+
+// timestamp info
+typedef struct rx_packet_analysis {
+  unsigned int ifg_start_tick;
+  unsigned int ifg_end_tick;
+  unsigned int no_of_bytes;
+  unsigned int checksum;
+}rx_packet_analysis_t;
 /**
  * \brief   The interface between the xscope receiver and checker core
  */

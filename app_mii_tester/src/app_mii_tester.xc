@@ -4,17 +4,24 @@
 #include <stdint.h>
 #include <string.h>
 #include <platform.h>
-#include <assert.h>
-#include "random.h"
+#include "xassert.h"
 #include "common.h"
 #include <xscope.h>
 #include "smi.h"
-#define DEBUG_UNIT APP_MII_TESTER
 #include "debug_print.h"
 
 #define XSCOPE_TILE     0
 #define ETHERNET_TILE   1
-#define TX_1_ENABLED    1
+
+#define TX_1_ENABLED    0
+
+#ifndef TX_0_ENABLED
+#define TX_0_ENABLED   1
+#endif
+
+#ifndef TX_1_ENABLED
+#define TX_1_ENABLED   1
+#endif
 
 #define PORT_ETH_RXCLK_0 on tile[1]: XS1_PORT_1B
 #define PORT_ETH_RXD_0 on tile[1]: XS1_PORT_4A
@@ -157,6 +164,7 @@ void rx(in buffered port:32 rxd, in port rxdv, streaming chanend c_rx_to_timesta
     unsigned rx_ticks = 0;
     unsigned checksum = 0;
 
+    clearbuf(rxd);
     rxd when pinseq(ETH_SFD) :> int;
 
     t :> rx_ticks;
@@ -187,6 +195,7 @@ void rx(in buffered port:32 rxd, in port rxdv, streaming chanend c_rx_to_timesta
             checksum = buffer[word_count-1];
           }
 
+          c_rx_to_timestamp <: checksum;
           c_rx_to_timestamp <: byte_count;
           end_of_frame = 1;
           break;
@@ -198,13 +207,14 @@ void rx(in buffered port:32 rxd, in port rxdv, streaming chanend c_rx_to_timesta
 /*
  *
  */
-void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,
-        streaming chanend c_tx_to_timestamp)
+void tx(out buffered port:32 txd, streaming chanend c_data_handler_to_tx,
+        streaming chanend c_tx_to_timestamp,tx_interface_t tx_intrf)
 {
   unsigned tx_ticks;
   unsigned char data_buff[1522];
   uintptr_t dptr;
-  unsigned idx;
+  unsigned idx,tx_indx=0;
+  unsigned tx_start_ticks[MAX_PACKET_SEQUENCE];
   timer t;
 
   for(idx = 0;idx<12;idx++)
@@ -221,46 +231,54 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,
     unsigned no_of_packets;
 
     c_data_handler_to_tx :> no_of_packets;
+    c_tx_to_timestamp <: tx_intrf;
     c_tx_to_timestamp <: no_of_packets;
 
-    while(no_of_packets--) {
-    unsigned wait_time = 0;
-    unsigned size_in_bytes = 0;
-    unsigned checksum = 0;
-    unsigned data;
+    do{
+      unsigned wait_time = 0;
+      unsigned size_in_bytes = 0;
+      unsigned checksum = 0;
+      unsigned data;
 
-    slave {
       c_data_handler_to_tx :> wait_time;
       c_data_handler_to_tx :> size_in_bytes;
       c_data_handler_to_tx :> checksum;
-    }
 
-    data_buff[size_in_bytes] = checksum;
+      memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
 
-    t :> tx_ticks;
-    /**< when a tx cmd come from tx_to_app then send it out */
-    t when timerafter(tx_ticks+wait_time) :> tx_ticks;
+      if (!tx_indx)
+          t :> tx_ticks;
 
-    c_tx_to_timestamp <: tx_ticks;
+      /**< when a tx cmd come from tx_to_app then send it out */
+      t when timerafter(tx_ticks+wait_time) :> tx_ticks;
 
-    txd <: 0x55555555;              /**< send ethernet preamble */
-    txd <: 0xD5555555;              /**< send Start of frame delimiter */
+      tx_start_ticks[tx_indx++] = tx_ticks;
+      assert(tx_indx <= MAX_PACKET_SEQUENCE);
 
-    /**< send data from pointer, including checksum */
-    for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
+      txd <: 0x55555555;              /**< send ethernet preamble */
+      txd <: 0xD5555555;              /**< send Start of frame delimiter */
+
+      /**< send data from pointer, including checksum */
+      for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
+        asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
+        txd <: data;
+      }
+
       asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-      txd <: data;
+      /**< send the remaining no of bytes, if not in 4byte offset */
+      if(size_in_bytes&3) {
+        unsigned tailllen = ((size_in_bytes&3)*8);
+        partout(txd, tailllen, data);
+      }
+      sync(txd);
+      t :> tx_ticks;
+    }while(--no_of_packets);
+    for(int i=0; i<tx_indx;i++)
+    {
+        debug_printf("TX[%d]: %x |\n",i,tx_start_ticks[i]);
     }
 
-    asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-    /**< send the remaining no of bytes, if not in 4byte offset */
-    if(size_in_bytes&3) {
-      unsigned tailllen = ((size_in_bytes&3)*8);
-      partout(txd, tailllen, data);
-    }
-
-    //c_data_handler_to_tx <: HOST_CMD_TX_ACK;
-  }
+    tx_indx = 0;
   }
 }
 /*
@@ -268,47 +286,69 @@ void tx(out buffered port:32 txd, chanend c_data_handler_to_tx,
  */
 void time_stamp(streaming chanend c_tx_to_timestamp, streaming chanend c_rx_to_timestamp)
 {
-  unsigned time_stamp_flag_l = 0,time_stamp_flag_t = 0,no_pkt_flag=0;
-  unsigned tx_ticks,rx_ticks,start_ticks,byte_count;
-  unsigned no_pkt_send = 0, no_pkt_rxcd = 0;
+  tx_interface_t tx_interface;
+  unsigned char rx_ts_flag = 0,rx_idx=0;
+  unsigned no_pkt_send = 0,no_pkt_recd = 0;
+  rx_packet_analysis_t rx_packet_analysis[MAX_PACKET_SEQUENCE];
 
   while(1) {
     select {
 
-      case c_tx_to_timestamp :> tx_ticks:
-          //First tx_ticks is no_pkt_send
-          if(!no_pkt_flag) {
-              no_pkt_send = tx_ticks;
-              no_pkt_flag = 1;
-              break;
-          }
-          time_stamp_flag_l = 1;
+      case c_tx_to_timestamp :> unsigned from_tx_thread: {
+          tx_interface = (tx_interface_t)from_tx_thread;
+          c_tx_to_timestamp :> no_pkt_send;
         break;
+      }
 
-      case c_rx_to_timestamp :> rx_ticks: {
-        c_rx_to_timestamp :> byte_count;
-        no_pkt_rxcd++;
+      case c_rx_to_timestamp :> unsigned from_rx_thread: {
 
-        if(!time_stamp_flag_t) {
-            start_ticks = rx_ticks;
-            time_stamp_flag_t = 1;
-            break;
+        if(!rx_ts_flag) {
+            rx_ts_flag = 1;
+            rx_idx = 0;
+            rx_packet_analysis[rx_idx].ifg_start_tick = from_rx_thread;
+
+        }
+        else {
+            rx_packet_analysis[rx_idx].ifg_end_tick = from_rx_thread;
+            rx_idx+=1;
+            rx_packet_analysis[rx_idx].ifg_start_tick = from_rx_thread;
+            rx_packet_analysis[rx_idx].ifg_end_tick = 0;
         }
 
-        const int preamble = 64;
-        int stop_ticks = rx_ticks-preamble-(byte_count*8);
+        c_rx_to_timestamp :> rx_packet_analysis[rx_idx].checksum;
+        c_rx_to_timestamp :> rx_packet_analysis[rx_idx].no_of_bytes;
+        no_pkt_recd++;
 
-        if(stop_ticks > start_ticks)
-          printuintln(stop_ticks-start_ticks);
-        else
-          printuintln((0xFFFFFFFF-start_ticks)+stop_ticks);
+        if(no_pkt_recd == no_pkt_send){
+            const unsigned preamble = 64;
+            unsigned ifg = 0;
+            rx_ts_flag = 0;
+            rx_idx = 0;
+            no_pkt_send = 0;
+            debug_printf("+----------------------------------------------------------+\n");
+            debug_printf("| I | Pn | Size | Checksum | StartTick| End Tick | IfgTime |\n");
+            debug_printf("+----------------------------------------------------------+\n");
+            for(int i=0;i<no_pkt_recd;i++) {
+              if(i<(no_pkt_recd-1)) {
+                  if(rx_packet_analysis[i].ifg_end_tick > rx_packet_analysis[i].ifg_start_tick)
+                     ifg = (rx_packet_analysis[i].ifg_end_tick-rx_packet_analysis[i].ifg_start_tick);
+                  else
+                     ifg = (0xFFFFFFFF-rx_packet_analysis[i].ifg_start_tick)+rx_packet_analysis[i].ifg_end_tick;
 
-        start_ticks = rx_ticks;
-        if(no_pkt_rxcd == no_pkt_send) {
-           time_stamp_flag_t = 0;
-           no_pkt_flag = 0;
-           no_pkt_rxcd = 0;
+                  ifg = ifg - (rx_packet_analysis[i].no_of_bytes * 8)-preamble;
+                  assert(ifg > MIN_IFG_BYTES);
+                }
+                debug_printf("| %d | %d | %d | %x | %x | %x | %d |\n", \
+                tx_interface,i,rx_packet_analysis[i].no_of_bytes, \
+                             rx_packet_analysis[i].checksum, \
+                             rx_packet_analysis[i].ifg_start_tick, \
+                             rx_packet_analysis[i].ifg_end_tick,ifg);
 
+
+                ifg = 0;
+            }
+
+            no_pkt_recd = 0;
         }
         break;
       }
@@ -316,7 +356,8 @@ void time_stamp(streaming chanend c_tx_to_timestamp, streaming chanend c_rx_to_t
   }
 }
 void data_handler(server interface xscope_config i_xscope_config,
-                  chanend c_data_handler_to_tx_0,chanend c_data_handler_to_tx_1)
+                  streaming chanend c_data_handler_to_tx_0,
+                  streaming chanend c_data_handler_to_tx_1)
 {
   packet_control_t packet_control[MAX_PACKET_SEQUENCE];
   int eop_flag = 0;
@@ -333,8 +374,10 @@ void data_handler(server interface xscope_config i_xscope_config,
 
           packet_number = (GET_PACKET_NO(xscope_buff[0]) % END_OF_PACKET_SEQUENCE);
 
-          packet_control[packet_number].frame_delay = ((xscope_buff[0] >> 11)&0x7FFF);
-          packet_control[packet_number].frame_size = (xscope_buff[0] & 0x7FF);
+          assert(packet_number < MAX_PACKET_SEQUENCE);
+
+          packet_control[packet_number].frame_delay = GET_FRAME_DELAY(xscope_buff[0]);
+          packet_control[packet_number].frame_size = GET_FRAME_SIZE(xscope_buff[0]);
           packet_control[packet_number].frame_crc = xscope_buff[1];
 
           if( (!eop_flag) && (GET_PACKET_NO(xscope_buff[0]) & END_OF_PACKET_SEQUENCE)) {
@@ -354,23 +397,22 @@ void data_handler(server interface xscope_config i_xscope_config,
 
       eop_flag => default:
           unsigned frames_send = 0;
-          c_data_handler_to_tx_0 <: frames_tobe_sent;
-#ifdef TX_1_ENABLED
-          c_data_handler_to_tx_1 <: frames_tobe_sent;
-#endif
+          if (TX_0_ENABLED)
+              c_data_handler_to_tx_0 <: frames_tobe_sent;
+          if (TX_1_ENABLED)
+              c_data_handler_to_tx_1 <: frames_tobe_sent;
+
           do{
-            master {
+            if (TX_0_ENABLED) {
                 c_data_handler_to_tx_0 <: packet_control[frames_send].frame_delay;
                 c_data_handler_to_tx_0 <: packet_control[frames_send].frame_size;
                 c_data_handler_to_tx_0 <: packet_control[frames_send].frame_crc;
             }
-#ifdef TX_1_ENABLED
-            master {
+            if (TX_1_ENABLED) {
                 c_data_handler_to_tx_1 <: packet_control[frames_send].frame_delay;
                 c_data_handler_to_tx_1 <: packet_control[frames_send].frame_size;
                 c_data_handler_to_tx_1 <: packet_control[frames_send].frame_crc;
             }
-#endif
             frames_send++;
           }while(frames_send < frames_tobe_sent);
           eop_flag = 0;
@@ -410,8 +452,8 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
 int main(void) {
 
   chan c_host_data;
-  chan c_data_handler_to_tx_0;
-  chan c_data_handler_to_tx_1;
+  streaming chan c_data_handler_to_tx_0;
+  streaming chan c_data_handler_to_tx_1;
 
   par {
     xscope_host_data(c_host_data);
@@ -438,12 +480,16 @@ int main(void) {
       rx_init(rx0);
       rx_init(rx1);
       par {
-          tx(tx0.txd,c_data_handler_to_tx_0,c_tx_0_to_timestamp);   /**< Transmit Frames on square slot */
+#if (TX_0_ENABLED)
+          tx(tx0.txd,c_data_handler_to_tx_0,c_tx_0_to_timestamp,TX_0_INTRF);   /**< Transmit Frames on square slot */
           rx(rx1.rxd, rx1.rxdv, c_rx_1_to_timestamp);               /**< Receive Frames on circle slot */
-          tx(tx1.txd,c_data_handler_to_tx_1,c_tx_1_to_timestamp);   /**< Transmit Frames on circle slot */
-          rx(rx0.rxd, rx0.rxdv, c_rx_0_to_timestamp);               /**< Receive Frames on square slot */
           time_stamp(c_tx_0_to_timestamp,c_rx_1_to_timestamp);
+#endif
+#if (TX_1_ENABLED)
+          tx(tx1.txd,c_data_handler_to_tx_1,c_tx_1_to_timestamp,TX_1_INTRF);   /**< Transmit Frames on circle slot */
+          rx(rx0.rxd, rx0.rxdv, c_rx_0_to_timestamp);               /**< Receive Frames on square slot */
           time_stamp(c_tx_1_to_timestamp,c_rx_0_to_timestamp);
+#endif
       }
     }
 
