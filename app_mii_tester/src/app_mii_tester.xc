@@ -13,6 +13,9 @@
 #define XSCOPE_TILE     0
 #define ETHERNET_TILE   1
 
+#define IFG_COMPENSATION_FACTOR   7  //7bits
+#define XSCOPE_DATA_SIMULATION 0
+
 #define TX_1_ENABLED    0
 
 #ifndef TX_0_ENABLED
@@ -50,7 +53,7 @@ on tile[1]: smi_interface_t smi0 = { 0x80000000, XS1_PORT_8A, XS1_PORT_4C };
 on tile[1]: smi_interface_t smi1 = { 0, XS1_PORT_1M, XS1_PORT_1N };
 
 on tile[1]: out port tx_prf_gpio_0 = XS1_PORT_1E;
-on tile[1]: out port tx_prf_gpio_1 = XS1_PORT_1H;
+on tile[1]: out port rx_prf_gpio_0 = XS1_PORT_1H;
 
 typedef struct mii_tx_ports {
   out buffered port:32    txd;    /**< MII TX data wire */
@@ -152,272 +155,160 @@ static void tx_init(mii_tx_ports_t &p) {
 /*
  *
  */
-void rx(in buffered port:32 rxd, in port rxdv, streaming chanend c_rx_to_timestamp)
+void rx(in buffered port:32 rxd, in port rxdv, server interface rx_config i_rx_config)
 {
   timer t;
+  unsigned char rx_indx=0,num_of_pkt_to_recd=0;
   unsigned buffer[MAX_BUFFER_WORDS];
+  rx_packet_info_t rx_packet_info[MAX_PACKET_SEQUENCE];
 
   while(1) {
-    unsigned end_of_frame = 0;
-    unsigned word_count = 0;
-    unsigned byte_count = 0;
-    unsigned rx_ticks = 0;
-    unsigned checksum = 0;
+    select {
+      num_of_pkt_to_recd => default : {
+        assert(rx_indx == 0);
+        do {
+          unsigned end_of_frame = 0;
+          unsigned word_count = 0;
+          unsigned byte_count = 0;
+          unsigned rx_ticks = 0;
+          unsigned checksum = 0;
 
-    clearbuf(rxd);
-    rxd when pinseq(ETH_SFD) :> int;
+          clearbuf(rxd);
+          rxd when pinseq(ETH_SFD) :> int;
 
-    t :> rx_ticks;
-    c_rx_to_timestamp <: rx_ticks;   //start/stop timestamp
+          t :> rx_ticks;
 
-    while(!end_of_frame) {
-      select {
+          while(!end_of_frame) {
+            select {
 
-        case rxd :> unsigned word: {
-          buffer[word_count++] = word;
-          byte_count+=4;
-          break;
-        }
+              case rxd :> unsigned word: {
+                buffer[word_count++] = word;
+                byte_count+=4;
+                break;
+              }
 
-        case rxdv when pinseq(0) :> int: {
-          unsigned tail;
-          unsigned taillen = endin(rxd);
-          rxd :> tail;
+              case rxdv when pinseq(0) :> int: {
+                unsigned tail;
+                unsigned taillen = endin(rxd);
+                rxd :> tail;
 
-          if(taillen) {
-            tail = tail >> (32 - taillen);
-            buffer[word_count++] = tail;
-            byte_count += (taillen >> 3);
+                if(taillen) {
+                  tail = tail >> (32 - taillen);
+                  buffer[word_count++] = tail;
+                  byte_count += (taillen >> 3);
 
-            checksum = ((tail << (32 - taillen)) | (buffer[word_count-2] >> taillen));
-          }
-          else {
-            checksum = buffer[word_count-1];
-          }
+                  checksum = ((tail << (32 - taillen)) | (buffer[word_count-2] >> taillen));
+                }
+                else {
+                  checksum = buffer[word_count-1];
+                }
 
-          c_rx_to_timestamp <: checksum;
-          c_rx_to_timestamp <: byte_count;
-          end_of_frame = 1;
-          break;
-        } /**< rxdv low */
+                rx_packet_info[rx_indx].rx_start_tick = rx_ticks;
+                rx_packet_info[rx_indx].no_of_bytes = byte_count-CRC_BYTES;
+                rx_packet_info[rx_indx++].checksum = checksum;
+
+                end_of_frame = 1;
+                break;
+              } /**< rxdv low */
+            }
+          } /**< frame */
+        }while(--num_of_pkt_to_recd);
+
+        i_rx_config.rx_completed();
+        break;
       }
-    } /**< frame */
+
+      case i_rx_config.put_packet_num_to_rx(unsigned char no_of_packets):
+        num_of_pkt_to_recd = no_of_packets;
+        break;
+
+      case i_rx_config.get_rx_pkt_info(rx_packet_info_t rxpkt_info[]) -> unsigned char return_value:
+        memcpy(rxpkt_info,rx_packet_info, rx_indx * sizeof(rx_packet_info_t));
+        return_value = rx_indx;
+        rx_indx = 0;
+        break;
+    }
   }
 }
 /*
  *
  */
-void tx(out buffered port:32 txd, streaming chanend c_data_handler_to_tx,
-        streaming chanend c_tx_to_timestamp,tx_interface_t tx_intrf)
+void tx(out buffered port:32 txd, server interface tx_config i_tx_config)
 {
   unsigned tx_ticks;
   unsigned char data_buff[1522];
   uintptr_t dptr;
   unsigned idx,tx_indx=0;
-  unsigned tx_start_ticks[MAX_PACKET_SEQUENCE];
+  tx_packet_info_t tx_packet_info[MAX_PACKET_SEQUENCE];
   timer t;
 
   for(idx = 0;idx<12;idx++)
     data_buff[idx] = 0xFF;
 
-  data_buff[12] = 0xAB; data_buff[13] = 0x88;
+  data_buff[12] = 0x88; data_buff[13] = 0xAB;   /**< Ethernet Powerlink Type */
 
   for(int idx=14;idx<(MAX_FRAME_SIZE-CRC_BYTES);idx++)
-    data_buff[idx] = ((idx-14)%255)+1;    // initialize packet data with 1,2,3,..255
+    data_buff[idx] = ((idx-14)%255)+1;          /**< initialize packet data with 1,2,3,..255 */
 
   asm volatile("mov %0, %1": "=r"(dptr):"r"(data_buff));
 
   while(1) {
-    unsigned no_of_packets;
-
-    c_data_handler_to_tx :> no_of_packets;
-    c_tx_to_timestamp <: tx_intrf;
-    c_tx_to_timestamp <: no_of_packets;
-
-    do{
-      unsigned wait_time = 0;
-      unsigned size_in_bytes = 0;
-      unsigned checksum = 0;
-      unsigned data;
-
-      c_data_handler_to_tx :> wait_time;
-      c_data_handler_to_tx :> size_in_bytes;
-      c_data_handler_to_tx :> checksum;
-
-      memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
-
-      if (!tx_indx)
-          t :> tx_ticks;
-
-      /**< when a tx cmd come from tx_to_app then send it out */
-      t when timerafter(tx_ticks+wait_time) :> tx_ticks;
-
-      tx_start_ticks[tx_indx++] = tx_ticks;
-      assert(tx_indx <= MAX_PACKET_SEQUENCE);
-
-      txd <: 0x55555555;              /**< send ethernet preamble */
-      txd <: 0xD5555555;              /**< send Start of frame delimiter */
-
-      /**< send data from pointer, including checksum */
-      for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
-        asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-        txd <: data;
-      }
-
-      asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-      /**< send the remaining no of bytes, if not in 4byte offset */
-      if(size_in_bytes&3) {
-        unsigned tailllen = ((size_in_bytes&3)*8);
-        partout(txd, tailllen, data);
-      }
-      sync(txd);
-      t :> tx_ticks;
-    }while(--no_of_packets);
-    for(int i=0; i<tx_indx;i++)
-    {
-        debug_printf("TX[%d]: %x |\n",i,tx_start_ticks[i]);
-    }
-
-    tx_indx = 0;
-  }
-}
-/*
- *
- */
-void time_stamp(streaming chanend c_tx_to_timestamp, streaming chanend c_rx_to_timestamp)
-{
-  tx_interface_t tx_interface;
-  unsigned char rx_ts_flag = 0,rx_idx=0;
-  unsigned no_pkt_send = 0,no_pkt_recd = 0;
-  rx_packet_analysis_t rx_packet_analysis[MAX_PACKET_SEQUENCE];
-
-  while(1) {
     select {
+      case i_tx_config.put_packet_ctrl_to_tx(packet_control_t pkt_ctrl[],unsigned char no_of_packets): {
 
-      case c_tx_to_timestamp :> unsigned from_tx_thread: {
-          tx_interface = (tx_interface_t)from_tx_thread;
-          c_tx_to_timestamp :> no_pkt_send;
-        break;
-      }
+        assert(no_of_packets < MAX_PACKET_SEQUENCE);
+        assert(tx_indx == 0);
 
-      case c_rx_to_timestamp :> unsigned from_rx_thread: {
+        do{
+          unsigned wait_time = pkt_ctrl[tx_indx].frame_delay;
+          unsigned size_in_bytes = pkt_ctrl[tx_indx].frame_size;
+          unsigned checksum = pkt_ctrl[tx_indx].frame_crc;
+          unsigned data = 0;
 
-        if(!rx_ts_flag) {
-            rx_ts_flag = 1;
-            rx_idx = 0;
-            rx_packet_analysis[rx_idx].ifg_start_tick = from_rx_thread;
+          tx_packet_info[tx_indx].no_of_bytes = size_in_bytes;
+          tx_packet_info[tx_indx].checksum = checksum;
 
-        }
-        else {
-            rx_packet_analysis[rx_idx].ifg_end_tick = from_rx_thread;
-            rx_idx+=1;
-            rx_packet_analysis[rx_idx].ifg_start_tick = from_rx_thread;
-            rx_packet_analysis[rx_idx].ifg_end_tick = 0;
-        }
+          memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
 
-        c_rx_to_timestamp :> rx_packet_analysis[rx_idx].checksum;
-        c_rx_to_timestamp :> rx_packet_analysis[rx_idx].no_of_bytes;
-        no_pkt_recd++;
+          if (!tx_indx)
+            t :> tx_ticks;
 
-        if(no_pkt_recd == no_pkt_send){
-            const unsigned preamble = 64;
-            unsigned ifg = 0;
-            rx_ts_flag = 0;
-            rx_idx = 0;
-            no_pkt_send = 0;
-            debug_printf("+----------------------------------------------------------+\n");
-            debug_printf("| I | Pn | Size | Checksum | StartTick| End Tick | IfgTime |\n");
-            debug_printf("+----------------------------------------------------------+\n");
-            for(int i=0;i<no_pkt_recd;i++) {
-              if(i<(no_pkt_recd-1)) {
-                  if(rx_packet_analysis[i].ifg_end_tick > rx_packet_analysis[i].ifg_start_tick)
-                     ifg = (rx_packet_analysis[i].ifg_end_tick-rx_packet_analysis[i].ifg_start_tick);
-                  else
-                     ifg = (0xFFFFFFFF-rx_packet_analysis[i].ifg_start_tick)+rx_packet_analysis[i].ifg_end_tick;
+          /**< when a tx cmd come from tx_to_app then send it out */
+          t when timerafter(tx_ticks+wait_time) :> tx_ticks;
 
-                  ifg = ifg - (rx_packet_analysis[i].no_of_bytes * 8)-preamble;
-                  assert(ifg > MIN_IFG_BYTES);
-                }
-                debug_printf("| %d | %d | %d | %x | %x | %x | %d |\n", \
-                tx_interface,i,rx_packet_analysis[i].no_of_bytes, \
-                             rx_packet_analysis[i].checksum, \
-                             rx_packet_analysis[i].ifg_start_tick, \
-                             rx_packet_analysis[i].ifg_end_tick,ifg);
+          tx_packet_info[tx_indx++].tx_start_tick = tx_ticks;
+          assert(tx_indx <= MAX_PACKET_SEQUENCE);
 
+          txd <: 0x55555555;              /**< send ethernet preamble */
+          txd <: 0xD5555555;              /**< send Start of frame delimiter */
 
-                ifg = 0;
-            }
-
-            no_pkt_recd = 0;
-        }
-        break;
-      }
-    }
-  }
-}
-void data_handler(server interface xscope_config i_xscope_config,
-                  streaming chanend c_data_handler_to_tx_0,
-                  streaming chanend c_data_handler_to_tx_1)
-{
-  packet_control_t packet_control[MAX_PACKET_SEQUENCE];
-  int eop_flag = 0;
-  char buff_access_flag = 0;
-  unsigned frames_tobe_sent = 0;
-
-  while(1) {
-    select {
-
-      case i_xscope_config.put_buffer(unsigned int xscope_buff[]): {
-        unsigned packet_number = 0;
-        if( (!buff_access_flag) && (!eop_flag) ){
-          buff_access_flag = 1;
-
-          packet_number = (GET_PACKET_NO(xscope_buff[0]) % END_OF_PACKET_SEQUENCE);
-
-          assert(packet_number < MAX_PACKET_SEQUENCE);
-
-          packet_control[packet_number].frame_delay = GET_FRAME_DELAY(xscope_buff[0]);
-          packet_control[packet_number].frame_size = GET_FRAME_SIZE(xscope_buff[0]);
-          packet_control[packet_number].frame_crc = xscope_buff[1];
-
-          if( (!eop_flag) && (GET_PACKET_NO(xscope_buff[0]) & END_OF_PACKET_SEQUENCE)) {
-              frames_tobe_sent = packet_number+1;      /**< Added '1' since packet number always starts with '0' */
-              eop_flag = 1;
+          /**< send data from pointer, including checksum */
+          for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
+            asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
+            txd <: data;
           }
 
-          buff_access_flag = 0;
-          xscope_int(0, 1);
-        }
-        else {
-          debug_printf("Frame Arrived During buffer handling or During Tx\n");
-          xscope_int(0, 1);
-        }
+          asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
+          /**< send the remaining no of bytes, if not in 4byte offset */
+          if(size_in_bytes&3) {
+            unsigned tailllen = ((size_in_bytes&3)*8);
+            partout(txd, tailllen, data);
+          }
+
+          sync(txd);
+          t :> tx_ticks;
+
+        }while(--no_of_packets);
+
+        i_tx_config.tx_completed();
         break;
       }
 
-      eop_flag => default:
-          unsigned frames_send = 0;
-          if (TX_0_ENABLED)
-              c_data_handler_to_tx_0 <: frames_tobe_sent;
-          if (TX_1_ENABLED)
-              c_data_handler_to_tx_1 <: frames_tobe_sent;
-
-          do{
-            if (TX_0_ENABLED) {
-                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_delay;
-                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_size;
-                c_data_handler_to_tx_0 <: packet_control[frames_send].frame_crc;
-            }
-            if (TX_1_ENABLED) {
-                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_delay;
-                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_size;
-                c_data_handler_to_tx_1 <: packet_control[frames_send].frame_crc;
-            }
-            frames_send++;
-          }while(frames_send < frames_tobe_sent);
-          eop_flag = 0;
-       break;
-
+      case i_tx_config.get_tx_pkt_info(tx_packet_info_t txpkt_info[]) -> unsigned char return_value:
+        memcpy(txpkt_info,tx_packet_info, tx_indx * sizeof(tx_packet_info_t));
+        return_value = tx_indx;
+        tx_indx = 0;
+      break;
     }
   }
 }
@@ -432,17 +323,44 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
   xscope_connect_data_from_host(c_host_data);
 
   while(1) {
-    int num_byte_read;
+    int num_byte_read=0;
     int data_gen_ack = 1;
-    select {
-
-      case xscope_data_from_host(c_host_data, (unsigned char *)xscope_buff, num_byte_read): {
-        if(num_byte_read != 0) {
+    if(XSCOPE_DATA_SIMULATION) {
+      select {
+        case xscope_data_from_host(c_host_data, (unsigned char *)xscope_buff, num_byte_read): {
+          if(num_byte_read != 0) {
             i_xscope_config.put_buffer(&xscope_buff[0]);
+          }
+          break;
         }
-        break;
       }
+    } else {
+        timer t;
+        unsigned tick;
 
+        xscope_buff[0] = ((0 & 0x3F) << 26) | ((10000 & 0x7FFF) << 11) | ((64-CRC_BYTES) & 0x7FF);
+        xscope_buff[1] = 0x12345678;
+        i_xscope_config.put_buffer(&xscope_buff[0]);
+        t :> tick;
+        t when timerafter(tick+60000000) :> tick;
+        xscope_buff[0] = ((1 & 0x3F) << 26)| ((1000 & 0x7FFF) << 11) | ((256-CRC_BYTES) & 0x7FF);
+        xscope_buff[1] = 0x87654321;
+        i_xscope_config.put_buffer(&xscope_buff[0]);
+        t :> tick;
+        t when timerafter(tick+60000000) :> tick;
+        xscope_buff[0] = ((2 & 0x3F) << 26)| ((500 & 0x7FFF) << 11) | ((1024-CRC_BYTES) & 0x7FF);
+        xscope_buff[1] = 0x87654321;
+        i_xscope_config.put_buffer(&xscope_buff[0]);
+        t :> tick;
+        t when timerafter(tick+60000000) :> tick;
+        xscope_buff[0] = ((3 & 0x3F) << 26)| ((960 & 0x7FFF) << 11) | ((1280-CRC_BYTES) & 0x7FF);
+        xscope_buff[1] = 0x87654321;
+        i_xscope_config.put_buffer(&xscope_buff[0]);
+        t :> tick;
+        t when timerafter(tick+60000000) :> tick;
+        xscope_buff[0] = ((END_OF_PACKET_SEQUENCE+4 & 0x3F) << 26)| ((96 & 0x7FFF) << 11) | ((1522-CRC_BYTES) & 0x7FF);
+        xscope_buff[1] = 0x87654321;
+        i_xscope_config.put_buffer(&xscope_buff[0]);
     }
   }
 }
@@ -452,16 +370,18 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
 int main(void) {
 
   chan c_host_data;
-  streaming chan c_data_handler_to_tx_0;
-  streaming chan c_data_handler_to_tx_1;
+  interface tx_config i_tx_config;
+  interface rx_config i_rx_config;
 
   par {
     xscope_host_data(c_host_data);
     on tile [XSCOPE_TILE]: {
       interface xscope_config i_xscope_config;
+      interface data_manager i_data_manager;
       set_core_fast_mode_on();
       par {
-          data_handler(i_xscope_config,c_data_handler_to_tx_0,c_data_handler_to_tx_1);
+          data_controller(i_data_manager,i_tx_config,i_rx_config);
+          data_handler(i_xscope_config,i_data_manager);
           xscope_listener(c_host_data,i_xscope_config);
       }
     }
@@ -481,14 +401,12 @@ int main(void) {
       rx_init(rx1);
       par {
 #if (TX_0_ENABLED)
-          tx(tx0.txd,c_data_handler_to_tx_0,c_tx_0_to_timestamp,TX_0_INTRF);   /**< Transmit Frames on square slot */
-          rx(rx1.rxd, rx1.rxdv, c_rx_1_to_timestamp);               /**< Receive Frames on circle slot */
-          time_stamp(c_tx_0_to_timestamp,c_rx_1_to_timestamp);
+          tx(tx0.txd,i_tx_config);             /**< Transmit Frames on square slot */
+          rx(rx1.rxd, rx1.rxdv, i_rx_config);  /**< Receive Frames on circle slot */
 #endif
 #if (TX_1_ENABLED)
-          tx(tx1.txd,c_data_handler_to_tx_1,c_tx_1_to_timestamp,TX_1_INTRF);   /**< Transmit Frames on circle slot */
-          rx(rx0.rxd, rx0.rxdv, c_rx_0_to_timestamp);               /**< Receive Frames on square slot */
-          time_stamp(c_tx_1_to_timestamp,c_rx_0_to_timestamp);
+          //tx(tx1.txd,c_data_handler_to_tx_1,c_tx_1_to_timestamp,TX_1_INTRF);   /**< Transmit Frames on circle slot */
+          //rx(rx0.rxd, rx0.rxdv, c_rx_0_to_timestamp);               /**< Receive Frames on square slot */
 #endif
       }
     }

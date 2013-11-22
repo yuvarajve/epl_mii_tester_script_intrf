@@ -11,6 +11,7 @@
 #include "mii_tester.h"
 #include <stdlib.h>
 #include <ctype.h>
+#include <time.h>
 
 /*
 * Includes for thread support
@@ -88,16 +89,24 @@ unsigned int get_random_ifg_delay(void)
   unsigned int random_ifg_delay = 0;
   unsigned int min, max;
 
-  if(ETH_SPEED == 10){
-    min = (MIN_IFG_BYTES * 8) * 10;   // calculated in terms of 10nSec tick rate of xcore timer
-    max = (MAX_IFG_BYTES * 8) * 10;
-  }
-  else {  // default 100Mbps
-    min = (MIN_IFG_BYTES * 8) * 1;   // calculated in terms of 10nSec tick rate of xcore timer
-    max = (MAX_IFG_BYTES * 8) * 1;
+  if ((rand() % 100) > 10) {
+    min = 8 * 8;
+    max = 20 * 8;
+  } else {
+    min = MIN_IFG_BYTES * 8;
+    max = MAX_IFG_BYTES * 8;
   }
 
-  random_ifg_delay = (rand() %( max - min + 1) + min);
+  if (ETH_SPEED == 10) {
+    min = min * 10;
+    max = max * 10;
+  }
+
+  if (max != min) {
+    random_ifg_delay = (rand() % (max - min)) + min;
+  } else {
+    random_ifg_delay = min;
+  }
   return random_ifg_delay;
 }
 
@@ -119,7 +128,8 @@ int send_packet(int sockfd,unsigned char pkt_no)
   unsigned int delay = get_random_ifg_delay();
   unsigned int num_data_bytes = get_random_packet_size();
   unsigned char pBuffer[MAX_BYTES_CAN_SEND] = {0};
-  unsigned int timeout = 0;
+  time_t start_time, current_time;
+  int retval = XSCOPE_EP_FAILURE;
 
   packet_control_t packet_control;
 
@@ -136,11 +146,16 @@ int send_packet(int sockfd,unsigned char pkt_no)
   packet_control.frame_crc = crc_value;
 
   memcpy(pBuffer,(unsigned char *)&packet_control,PKT_CTRL_BYTES);
-  while((xscope_ep_request_upload(sockfd, PKT_CTRL_BYTES,pBuffer) != XSCOPE_EP_SUCCESS) && (timeout++ < 0x7FFFFF))
-  	; // wait till we get success
+
+  time(&current_time);
+  start_time = current_time;
+  while ((retval != XSCOPE_EP_SUCCESS) && ((current_time - start_time) < 5)) {
+    retval = xscope_ep_request_upload(sockfd, PKT_CTRL_BYTES, pBuffer);
+    time(&current_time); // wait till we get success
+  }
   
-  assert(timeout < 0x7FFFF);
-  Sleep(30);
+  assert(retval == XSCOPE_EP_SUCCESS);
+//  Sleep(30);
   //printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(pkt_no%END_OF_PACKET_SEQUENCE)+1,delay,(num_data_bytes-CRC_BYTES),packet_control.frame_crc);
   
   return 0;
@@ -171,6 +186,7 @@ void *packet_generation_thread(void *arg)
   //printf("+-------------------------------------+------------------------------------------+\n");
 	
   while(1) {
+	Sleep(1);
     
     // get random packet number
     no_of_packets = get_random_packets(); 	
@@ -190,7 +206,6 @@ void *packet_generation_thread(void *arg)
       printf("send_packet : Failed !!\n");
 	  
     printf("\n");
-	Sleep(1000);
 	
   }
   return 0;

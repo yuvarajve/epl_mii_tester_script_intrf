@@ -9,7 +9,7 @@
 #define MAC_DST_BYTES          6
 #define MAC_SRC_BYTES          6
 #define ETH_TYPE_BYTES         2
-#define MIN_NO_OF_PACKET       1
+#define MIN_NO_OF_PACKET       2
 #define MAX_NO_OF_PACKET       20
 #define MIN_FRAME_SIZE         64      
 #define MAX_FRAME_SIZE         1522   
@@ -17,7 +17,7 @@
 #define PKT_DELAY_BYTES        sizeof(unsigned int)
 #define PKT_SIZE_BYTES         sizeof(unsigned int)
 #define MIN_IFG_BYTES          12       // Caution: Don't go below this
-#define MAX_IFG_BYTES          1250     // 
+#define MAX_IFG_BYTES          1250     // 1250
 #define MAX_BYTES_CAN_SEND     256
 #define END_OF_PACKET_SEQUENCE (1<<5)
 
