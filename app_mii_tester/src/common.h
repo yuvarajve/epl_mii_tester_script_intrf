@@ -22,17 +22,12 @@ typedef enum {
   TX_0_INTRF,
   TX_1_INTRF
 } tx_interface_t;
+
 typedef enum {
   TX_SUCCESS,
-  TX_PKT_NUM_INVALID,
-  TX_FRAME_SIZE_INVALID,
-  TX_CHKSUM_INVALID,
-
+  TX_ERROR,
   RX_SUCCESS,
-  RX_PKT_NUM_INVALID,
-  RX_FRAME_SIZE_INVALID,
-  RX_CHKSUM_INVALID,
-  RX_IFG_INVALID,
+  RX_ERROR,
   TOTAL_STATUS             /**< this must be last*/
 }status_info_t;
 
@@ -69,15 +64,15 @@ interface data_manager {
 };
 
 interface tx_config {
-    void put_packet_ctrl_to_tx(packet_control_t pkt_ctrl[],unsigned char num_of_pkt);
+    [[guarded]] void put_packet_ctrl_to_tx(packet_control_t pkt_ctrl[],unsigned char num_of_pkt);
     [[notification]] slave void tx_completed(void);
-    [[clears_notification]] unsigned char get_tx_pkt_info(tx_packet_info_t txpkt_info[]);
+    [[guarded,clears_notification]] unsigned char get_tx_pkt_info(tx_packet_info_t txpkt_info[]);
 };
 
 interface rx_config {
-    void put_packet_num_to_rx(unsigned char num_of_pkt);
+    [[guarded]] void put_packet_num_to_rx(unsigned char num_of_pkt);
     [[notification]] slave void rx_completed(void);
-    [[clears_notification]] unsigned char get_rx_pkt_info(rx_packet_info_t rxpkt_info[]);
+    [[guarded,clears_notification]] unsigned char get_rx_pkt_info(rx_packet_info_t rxpkt_info[]);
 };
 
 void data_handler(server interface xscope_config i_xscope_config,

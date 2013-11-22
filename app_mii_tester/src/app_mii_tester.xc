@@ -155,6 +155,7 @@ static void tx_init(mii_tx_ports_t &p) {
 /*
  *
  */
+#define RX_TIMEOUT 100000 // A timeout value of 1 ms
 void rx(in buffered port:32 rxd, in port rxdv, server interface rx_config i_rx_config)
 {
   timer t;
@@ -164,64 +165,76 @@ void rx(in buffered port:32 rxd, in port rxdv, server interface rx_config i_rx_c
 
   while(1) {
     select {
-      num_of_pkt_to_recd => default : {
-        assert(rx_indx == 0);
-        do {
-          unsigned end_of_frame = 0;
-          unsigned word_count = 0;
-          unsigned byte_count = 0;
-          unsigned rx_ticks = 0;
-          unsigned checksum = 0;
-
-          clearbuf(rxd);
-          rxd when pinseq(ETH_SFD) :> int;
-
-          t :> rx_ticks;
-
-          while(!end_of_frame) {
-            select {
-
-              case rxd :> unsigned word: {
-                buffer[word_count++] = word;
-                byte_count+=4;
-                break;
-              }
-
-              case rxdv when pinseq(0) :> int: {
-                unsigned tail;
-                unsigned taillen = endin(rxd);
-                rxd :> tail;
-
-                if(taillen) {
-                  tail = tail >> (32 - taillen);
-                  buffer[word_count++] = tail;
-                  byte_count += (taillen >> 3);
-
-                  checksum = ((tail << (32 - taillen)) | (buffer[word_count-2] >> taillen));
-                }
-                else {
-                  checksum = buffer[word_count-1];
-                }
-
-                rx_packet_info[rx_indx].rx_start_tick = rx_ticks;
-                rx_packet_info[rx_indx].no_of_bytes = byte_count-CRC_BYTES;
-                rx_packet_info[rx_indx++].checksum = checksum;
-
-                end_of_frame = 1;
-                break;
-              } /**< rxdv low */
-            }
-          } /**< frame */
-        }while(--num_of_pkt_to_recd);
-
-        i_rx_config.rx_completed();
-        break;
-      }
-
       case i_rx_config.put_packet_num_to_rx(unsigned char no_of_packets):
         num_of_pkt_to_recd = no_of_packets;
         break;
+    }
 
+    // Receive next sequence of packets
+    assert(rx_indx == 0);
+
+    unsigned rx_ticks = 0;
+    t :> rx_ticks;
+
+    do {
+      unsigned end_of_frame = 0;
+      unsigned word_count = 0;
+      unsigned byte_count = 0;
+      unsigned checksum = 0;
+      unsigned timedout = 0;
+
+      clearbuf(rxd);
+      select {
+        case rxd when pinseq(ETH_SFD) :> int:
+          break;
+
+        case t when timerafter(rx_ticks + RX_TIMEOUT) :> int:
+          timedout = 1;
+          break;
+      }
+      
+      t :> rx_ticks;
+
+      if (!timedout) {
+        while(!end_of_frame) {
+          select {
+            case rxd :> unsigned word: {
+              buffer[word_count++] = word;
+              byte_count+=4;
+              break;
+            }
+
+            case rxdv when pinseq(0) :> int: {
+              unsigned tail;
+              unsigned taillen = endin(rxd);
+              rxd :> tail;
+
+              if(taillen) {
+                tail = tail >> (32 - taillen);
+                buffer[word_count++] = tail;
+                byte_count += (taillen >> 3);
+
+                checksum = ((tail << (32 - taillen)) | (buffer[word_count-2] >> taillen));
+              }
+              else {
+                checksum = buffer[word_count-1];
+              }
+
+              end_of_frame = 1;
+              break;
+            } /**< rxdv low */
+          }
+        } /**< frame */
+      } /**< timedout */
+
+      rx_packet_info[rx_indx].rx_start_tick = rx_ticks;
+      rx_packet_info[rx_indx].no_of_bytes = byte_count-CRC_BYTES;
+      rx_packet_info[rx_indx++].checksum = checksum;
+    } while(--num_of_pkt_to_recd);
+
+    i_rx_config.rx_completed();
+
+    select {
       case i_rx_config.get_rx_pkt_info(rx_packet_info_t rxpkt_info[]) -> unsigned char return_value:
         memcpy(rxpkt_info,rx_packet_info, rx_indx * sizeof(rx_packet_info_t));
         return_value = rx_indx;
@@ -238,11 +251,10 @@ void tx(out buffered port:32 txd, server interface tx_config i_tx_config)
   unsigned tx_ticks;
   unsigned char data_buff[1522];
   uintptr_t dptr;
-  unsigned idx,tx_indx=0;
   tx_packet_info_t tx_packet_info[MAX_PACKET_SEQUENCE];
   timer t;
 
-  for(idx = 0;idx<12;idx++)
+  for(int idx = 0;idx<12;idx++)
     data_buff[idx] = 0xFF;
 
   data_buff[12] = 0x88; data_buff[13] = 0xAB;   /**< Ethernet Powerlink Type */
@@ -252,66 +264,75 @@ void tx(out buffered port:32 txd, server interface tx_config i_tx_config)
 
   asm volatile("mov %0, %1": "=r"(dptr):"r"(data_buff));
 
+  unsigned tx_indx = 0;
   while(1) {
+    unsigned packets_to_send = 0;
+    packet_control_t packet_control[MAX_PACKET_SEQUENCE];
+
     select {
       case i_tx_config.put_packet_ctrl_to_tx(packet_control_t pkt_ctrl[],unsigned char no_of_packets): {
-
-        assert(no_of_packets < MAX_PACKET_SEQUENCE);
-        assert(tx_indx == 0);
-
-        do{
-          unsigned wait_time = pkt_ctrl[tx_indx].frame_delay;
-          unsigned size_in_bytes = pkt_ctrl[tx_indx].frame_size;
-          unsigned checksum = pkt_ctrl[tx_indx].frame_crc;
-          unsigned data = 0;
-
-          tx_packet_info[tx_indx].no_of_bytes = size_in_bytes;
-          tx_packet_info[tx_indx].checksum = checksum;
-
-          memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
-
-          if (!tx_indx)
-            t :> tx_ticks;
-
-          /**< when a tx cmd come from tx_to_app then send it out */
-          t when timerafter(tx_ticks+wait_time) :> tx_ticks;
-
-          tx_packet_info[tx_indx++].tx_start_tick = tx_ticks;
-          assert(tx_indx <= MAX_PACKET_SEQUENCE);
-
-          txd <: 0x55555555;              /**< send ethernet preamble */
-          txd <: 0xD5555555;              /**< send Start of frame delimiter */
-
-          /**< send data from pointer, including checksum */
-          for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
-            asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-            txd <: data;
-          }
-
-          asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
-          /**< send the remaining no of bytes, if not in 4byte offset */
-          if(size_in_bytes&3) {
-            unsigned tailllen = ((size_in_bytes&3)*8);
-            partout(txd, tailllen, data);
-          }
-
-          sync(txd);
-          t :> tx_ticks;
-
-        }while(--no_of_packets);
-
-        i_tx_config.tx_completed();
+        packets_to_send = no_of_packets;
+        memcpy(packet_control,pkt_ctrl, no_of_packets * sizeof(packet_control_t));
         break;
       }
+    }
+    
+    assert(packets_to_send <= MAX_PACKET_SEQUENCE);
 
+    while (packets_to_send) {
+      unsigned wait_time = packet_control[tx_indx].frame_delay;
+      unsigned size_in_bytes = packet_control[tx_indx].frame_size;
+      unsigned checksum = packet_control[tx_indx].frame_crc;
+      unsigned data = 0;
+
+      tx_packet_info[tx_indx].no_of_bytes = size_in_bytes;
+      tx_packet_info[tx_indx].checksum = checksum;
+
+      memcpy(&data_buff[size_in_bytes],&checksum,CRC_BYTES);
+
+      if (!tx_indx)
+        t :> tx_ticks;
+
+      /**< when a tx cmd come from tx_to_app then send it out */
+      t when timerafter(tx_ticks+wait_time) :> tx_ticks;
+
+      tx_packet_info[tx_indx++].tx_start_tick = tx_ticks;
+      assert(tx_indx <= MAX_PACKET_SEQUENCE);
+
+      txd <: 0x55555555;              /**< send ethernet preamble */
+      txd <: 0xD5555555;              /**< send Start of frame delimiter */
+
+      /**< send data from pointer, including checksum */
+      int idx;
+      for(idx=0; idx<((size_in_bytes+CRC_BYTES)>>2);idx++) {
+        asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
+        txd <: data;
+      }
+
+      asm volatile("ldw %0, %1[%2]":"=r"(data):"r"(dptr), "r"(idx):"memory");
+      /**< send the remaining no of bytes, if not in 4byte offset */
+      if(size_in_bytes&3) {
+        unsigned tailllen = ((size_in_bytes&3)*8);
+        partout(txd, tailllen, data);
+      }
+
+      sync(txd);
+      t :> tx_ticks;
+      packets_to_send--;
+    }
+
+    i_tx_config.tx_completed();
+
+    select {
       case i_tx_config.get_tx_pkt_info(tx_packet_info_t txpkt_info[]) -> unsigned char return_value:
         memcpy(txpkt_info,tx_packet_info, tx_indx * sizeof(tx_packet_info_t));
         return_value = tx_indx;
         tx_indx = 0;
-      break;
+        break;
     }
   }
 }
+
 /**
  * \brief   A core that listens to data being sent from the host and
  *          informs the data generator to form data
@@ -325,11 +346,15 @@ void xscope_listener(chanend c_host_data,client interface xscope_config i_xscope
   while(1) {
     int num_byte_read=0;
     int data_gen_ack = 1;
-    if(XSCOPE_DATA_SIMULATION) {
+    if(!XSCOPE_DATA_SIMULATION) {
       select {
         case xscope_data_from_host(c_host_data, (unsigned char *)xscope_buff, num_byte_read): {
           if(num_byte_read != 0) {
             i_xscope_config.put_buffer(&xscope_buff[0]);
+            
+            // Workaround for xscope bug - inform host that we have finished processing buffer
+            // and are ready for the next one
+            xscope_int(0, 1);
           }
           break;
         }

@@ -9,18 +9,6 @@
 #include <xscope.h>
 #include "debug_print.h"
 
-char *g_status[TOTAL_STATUS] = {
-  "TX_SUCCESS",
-  "TX_PKT_NUM_INVALID",
-  "TX_FRAME_SIZE_INVALID",
-  "TX_CHKSUM_INVALID",
-
-  "RX_SUCCESS",
-  "RX_PKT_NUM_INVALID",
-  "RX_FRAME_SIZE_INVALID",
-  "RX_CHKSUM_INVALID",
-  "RX_IFG_INVALID"
-};
 /*
  *
  */
@@ -53,11 +41,9 @@ void data_handler(server interface xscope_config i_xscope_config,
           }
 
           buff_access_flag = 0;
-          xscope_int(0, 1);
         }
         else {
           debug_printf("Frame Arrived During buffer handling or During Tx\n");
-          xscope_int(0, 1);
         }
         break;
       }
@@ -69,13 +55,16 @@ void data_handler(server interface xscope_config i_xscope_config,
         break;
 
       case i_data_manager.status(status_info_t status):
-        printf("%s\n",g_status[status]);
-        status_awaited = 0;
+        status_awaited--;
+
+        if (status_awaited == 0)
+          // Inform the host that that test sequence is finished
+          xscope_int(0, 2);
         break;
 
       (eop_flag && !status_awaited) => default:
           i_data_manager.packet_arrived();
-          status_awaited = 1;
+          status_awaited = 2;
           eop_flag = 0;
 
         break;
@@ -104,32 +93,50 @@ void data_controller(client interface data_manager i_data_manager,
 
       case i_tx_config.tx_completed():
         num_of_pkt_sent = i_tx_config.get_tx_pkt_info(txpkt_info);
-        status_info_t tx_sts = TX_PKT_NUM_INVALID;
+        status_info_t tx_status = TX_SUCCESS;
         if(num_of_pkt_sent == num_of_pkt_to_send) {
-          tx_sts = TX_SUCCESS;
           for(int i=0;i<num_of_pkt_sent;i++) {
             if(txpkt_info[i].no_of_bytes != pkt_ctrl[i].frame_size){
-                tx_sts = TX_FRAME_SIZE_INVALID; break; }
+              tx_status = TX_ERROR;
+              debug_printf("ERROR: Tx Packet %d: length mismatch (%d != expected %d)\n", i, 
+                  txpkt_info[i].no_of_bytes, pkt_ctrl[i].frame_size);
+            }
             if(txpkt_info[i].checksum != pkt_ctrl[i].frame_crc){
-                tx_sts = TX_CHKSUM_INVALID; break; }
+              tx_status = TX_ERROR;
+              debug_printf("ERROR: Tx Packet %d: checksum invalid (%d != expected %d)\n", i, 
+                  txpkt_info[i].checksum, pkt_ctrl[i].frame_crc);
+            }
           }
+        } else {
+          tx_status = TX_ERROR;
+          debug_printf("ERROR: Tx %d packets sent instead of %d\n",
+              num_of_pkt_sent, num_of_pkt_to_send);
         }
-        i_data_manager.status(tx_sts);
+        i_data_manager.status(tx_status);
         break;
 
       case i_rx_config.rx_completed():
         num_of_pkt_recd = i_rx_config.get_rx_pkt_info(rxpkt_info);
-        status_info_t rx_sts = RX_PKT_NUM_INVALID;
+        status_info_t rx_status = RX_SUCCESS;
         if(num_of_pkt_recd == num_of_pkt_to_send) {
-          rx_sts = RX_SUCCESS;
           for(int i=0;i<num_of_pkt_recd;i++) {
             if(rxpkt_info[i].no_of_bytes != pkt_ctrl[i].frame_size){
-              rx_sts = RX_FRAME_SIZE_INVALID; break; }
+              rx_status = RX_ERROR;
+              debug_printf("ERROR: Rx Packet %d: length mismatch (%d != expected %d)\n", i, 
+                  rxpkt_info[i].no_of_bytes, pkt_ctrl[i].frame_size);
+            }
             if(rxpkt_info[i].checksum != pkt_ctrl[i].frame_crc){
-              rx_sts = RX_CHKSUM_INVALID; break; }
+              rx_status = RX_ERROR;
+              debug_printf("ERROR: Rx Packet %d: checksum invalid (%d != expected %d)\n", i, 
+                  rxpkt_info[i].checksum, pkt_ctrl[i].frame_crc);
+            }
           }
+        } else {
+          rx_status = RX_ERROR;
+          debug_printf("ERROR: Rx %d packets received instead of %d\n",
+              num_of_pkt_recd, num_of_pkt_to_send);
         }
-        i_data_manager.status(rx_sts);
+        i_data_manager.status(rx_status);
         break;
 
       num_of_pkt_arrived => default:

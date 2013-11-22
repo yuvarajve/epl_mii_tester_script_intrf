@@ -26,14 +26,21 @@
 const char *g_prompt = NULL;
 
 extern int xscope_ep_upload_pending;
+int packet_sequence_active = 0;
 int g_i = 0;
 int g_started = 0;
 void hook_data_received(void *data, int data_len)
 {
+  assert(data_len == 8);
   g_i++;
-  xscope_ep_upload_pending = 0;
   if (g_i == 199)
     g_started = 1;
+
+  int value = *((int*)data);
+  if (value == 1)
+    xscope_ep_upload_pending = 0;
+  else if (value == 2)
+    packet_sequence_active = 0;
 }
 
 void hook_exiting()
@@ -172,6 +179,7 @@ void *packet_generation_thread(void *arg)
 {
   int sockfd = *(int *)arg;
   unsigned char no_of_packets = 0;
+  unsigned int total_no_of_packets = 0;
   int loop;
   
   while (!g_started);
@@ -185,12 +193,22 @@ void *packet_generation_thread(void *arg)
   //printf("| ## | TxDelay | PktSize |  Checksum  |                                          |\n");
   //printf("+-------------------------------------+------------------------------------------+\n");
 	
+  // Allow the target time to start
+#ifdef _WIN32
+  Sleep(2000);
+#else
+  sleep(2);
+#endif
+
   while(1) {
-	Sleep(1);
+    while (packet_sequence_active); // wait for sequence completion
     
+    packet_sequence_active = 1;
+
     // get random packet number
     no_of_packets = get_random_packets(); 	
-	printf("no_of_packets: %d\n",no_of_packets);
+    total_no_of_packets += no_of_packets;
+    printf("no_of_packets: %10d (%10d)\n", no_of_packets, total_no_of_packets);
     // always send no of packets less than '1', on last packet number add END_OF_PACKET
     for(loop=0; loop < no_of_packets-1; loop++)
     {
