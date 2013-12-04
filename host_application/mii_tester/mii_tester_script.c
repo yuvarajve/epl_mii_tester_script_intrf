@@ -7,12 +7,12 @@
 *  ./mii_tester_script -s 127.0.0.1 -p 12346
 *
 */
-#include "shared.h"
-#include "mii_tester.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h>
-
+#include "xscope_host_shared.h"
+#include "mii_tester.h"
 /*
 * Includes for thread support
 */
@@ -22,21 +22,19 @@
 #include <pthread.h>
 #endif
 
-// Need to define this as NULL to indicate that there is no console being used
-const char *g_prompt = NULL;
-
 extern int xscope_ep_upload_pending;
 int packet_sequence_active = 0;
 int g_i = 0;
 int g_started = 0;
 void hook_data_received(void *data, int data_len)
 {
+int value = *((int*)data);
+
   assert(data_len == 8);
   g_i++;
   if (g_i == 199)
     g_started = 1;
-
-  int value = *((int*)data);
+	
   if (value == 1)
     xscope_ep_upload_pending = 0;
   else if (value == 2)
@@ -87,33 +85,17 @@ unsigned int get_random_packet_size(void)
 * 1 bit = (1/100e6) = 10nSec = 1 Timer Tick on xcore 
 * IFG delay @ 100Mbps = 10nSec * 12bytes * 8bits = 960nSec = 96 Timer Tick on xcore = 12*8*1
 *
-* Time of 1bit frame @ 10Mbps
-* 1 bit = (1/10e6) = 100nSec = 10 Timer Tick on xcore 
-* IFG delay @ 10Mbps = 100nSec * 12bytes * 8bits = 9600nSec = 960 Timer Tick on xcore = 12*8*10
 */
 unsigned int get_random_ifg_delay(void)
 {
   unsigned int random_ifg_delay = 0;
   unsigned int min, max;
 
-  if ((rand() % 100) > 10) {
-    min = 8 * 8;
-    max = 20 * 8;
-  } else {
-    min = MIN_IFG_BYTES * 8;
-    max = MAX_IFG_BYTES * 8;
-  }
-
-  if (ETH_SPEED == 10) {
-    min = min * 10;
-    max = max * 10;
-  }
-
-  if (max != min) {
-    random_ifg_delay = (rand() % (max - min)) + min;
-  } else {
-    random_ifg_delay = min;
-  }
+   min = (MIN_IFG_BYTES * 8) * 1;   // calculated in terms of 10nSec tick rate of xcore timer
+   max = (MAX_IFG_BYTES * 8) * 1;
+    
+   random_ifg_delay = (rand() %(max - min + 1) + min);
+   
   return random_ifg_delay;
 }
 
@@ -153,7 +135,6 @@ int send_packet(int sockfd,unsigned char pkt_no)
   packet_control.frame_crc = crc_value;
 
   memcpy(pBuffer,(unsigned char *)&packet_control,PKT_CTRL_BYTES);
-
   time(&current_time);
   start_time = current_time;
   while ((retval != XSCOPE_EP_SUCCESS) && ((current_time - start_time) < 5)) {
@@ -162,7 +143,7 @@ int send_packet(int sockfd,unsigned char pkt_no)
   }
   
   assert(retval == XSCOPE_EP_SUCCESS);
-//  Sleep(30);
+  //Sleep(30);
   //printf("| %02d |  %05d  | %06d  | 0x%08X |\n",(pkt_no%END_OF_PACKET_SEQUENCE)+1,delay,(num_data_bytes-CRC_BYTES),packet_control.frame_crc);
   
   return 0;

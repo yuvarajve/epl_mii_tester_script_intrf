@@ -37,6 +37,13 @@ typedef struct packet_control{
   unsigned int frame_crc;
 }packet_control_t;
 
+// packet_analyser
+typedef struct rx_packet_analysis {
+  unsigned int ifg_start_tick;
+  unsigned int ifg_end_tick;
+  unsigned int no_of_bytes;
+  unsigned int checksum;
+}rx_packet_analysis_t;
 #define PKT_CTRL_BYTES       sizeof(packet_control_t)
 #define ETH_FRAME_BYTES      sizeof(ethernet_frame_t)
 #define DEFAULT_LEN          (PKT_DELAY_BYTES + PKT_SIZE_BYTES + CRC_BYTES)  

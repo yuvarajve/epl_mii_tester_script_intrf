@@ -6,6 +6,7 @@
  */
 #ifdef _WIN32
   #include <winsock.h>
+  #include <windows.h>
   #pragma comment(lib, "Ws2_32.lib")
 
   // Provided by the inet_pton.c implementation locally
@@ -40,9 +41,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
-
-#include "pcapng.h"
-#include "pcap.h"
+#include <ctype.h>
 
 #define XSCOPE_EP_SUCCESS 0
 #define XSCOPE_EP_FAILURE 1
@@ -88,10 +87,6 @@ void print_and_exit(const char* format, ...);
 int xscope_ep_request_upload(int sockfd, unsigned int length, const unsigned char *data);
 
 void handle_socket(int sockfd);
-
-void emit_pcap_header(FILE *f);
-void emit_pcapng_section_header_block(FILE *f);
-void emit_pcapng_interface_description_block(FILE *f);
 
 #ifdef __XC__
 }

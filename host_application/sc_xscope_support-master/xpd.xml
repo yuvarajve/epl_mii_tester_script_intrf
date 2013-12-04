@@ -1,0 +1,11 @@
+<?xml version="1.0" ?>
+<xpd>
+    <components></components>
+    <description>A library to support easy development of host xscope applications.</description>
+    <location>origin</location>
+    <name>sc_xscope_support</name>
+    <maintainer>pthedinger</maintainer>
+    <vendor>XMOS</vendor>
+    <version_defines></version_defines>
+    <xpd_version>1.0</xpd_version>
+</xpd>

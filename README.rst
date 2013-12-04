@@ -9,6 +9,7 @@ The project requires the unreleased 13.0 tools (13.0.0 Community Version).
 5. New debug_print.c file changed,latest module_utils code used, code optimised to get better timestamp values
 6. Bug fixes
 7. code cleanup, optimized, debug prints added
+8. host application updated with latest sc_xscope_support files
 
 
 

@@ -1,24 +1,39 @@
-#include "shared.h"
+#include "xscope_host_shared.h"
 
+/*
+ * Debug: Setting DEBUG to 1 will enable logging to 'run.log'.
+ *        All data received on the socket will be logged.
+ */
 #define DEBUG 0
-
 FILE *g_log = NULL;
+
+/*
+ * The number of attempts to connect to the socket before giving up
+ */
+#define MAX_NUM_CONNECT_RETRIES 20
 
 /*
  * HOOKS: The application needs to implement the following hooks
  */
 
 // Called whenever data is received from the target
-void hook_data_received(void *data, int data_len);
+void hook_data_received(int xscope_probe, void *data, int data_len);
 
 // Called whenever the application is existing
 void hook_exiting();
 
-// The application needs to define the prompt if it is going to use
-// a console application. If it is NULL then it is assumed there is
-// no console on the host.
-extern const char *g_prompt;
+#ifdef XSCOPE_HOST_HAS_PROMPT
+  // The application needs to define the prompt if it is going to use
+  // a console application. If it is NULL then it is assumed there is
+  // no console on the host.
+  extern const char *g_prompt;
+#else
+  const char *g_prompt = NULL;
+#endif
 
+/*
+ * Library code
+ */
 int initialise_common(char *ip_addr_str, char *port_str)
 {
   int sockfd = 0;
@@ -27,6 +42,7 @@ int initialise_common(char *ip_addr_str, char *port_str)
   struct sockaddr_in serv_addr;
   char *end_pointer = NULL;
   int port = 0;
+  int connect_retries = 0;
 
   if (DEBUG)
     g_log = fopen("run.log", "w");
@@ -49,33 +65,53 @@ int initialise_common(char *ip_addr_str, char *port_str)
   }
 #endif // _WIN32
 
-  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    print_and_exit("ERROR: Could not create socket\n");
+  // Need the fflush because there is no newline in the print
+  printf("Connecting"); fflush(stdout);
+  while (1) {
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+      print_and_exit("ERROR: Could not create socket\n");
 
-  memset(&serv_addr, 0, sizeof(serv_addr));
+    memset(&serv_addr, 0, sizeof(serv_addr));
 
-  // Parse the port parameter
-  end_pointer = (char*)port_str;
-  port = strtol(port_str, &end_pointer, 10);
-  if (end_pointer == port_str)
-    print_and_exit("ERROR: Failed to parse port\n");
+    // Parse the port parameter
+    end_pointer = (char*)port_str;
+    port = strtol(port_str, &end_pointer, 10);
+    if (end_pointer == port_str)
+      print_and_exit("ERROR: Failed to parse port\n");
 
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(port);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
 
-  if (inet_pton(AF_INET, ip_addr_str, &serv_addr.sin_addr) <= 0)
-    print_and_exit("ERROR: inet_pton error occured\n");
+    if (inet_pton(AF_INET, ip_addr_str, &serv_addr.sin_addr) <= 0)
+      print_and_exit("ERROR: inet_pton error occured\n");
 
-  if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-    print_and_exit("ERROR: Connect failed\n");
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+      close(sockfd);
+
+      if (connect_retries < MAX_NUM_CONNECT_RETRIES) {
+        // Need the fflush because there is no newline in the print
+        printf("."); fflush(stdout);
+#ifdef _WIN32
+        Sleep(1000);
+#else
+        sleep(1);
+#endif
+        connect_retries++;
+      } else {
+        print_and_exit("\nERROR: Connect failed\n");
+      }
+    } else {
+      break;
+    }
+  }
 
   // Send the command to request which event types to receive
   command_buffer[0] = XSCOPE_SOCKET_MSG_EVENT_DATA | XSCOPE_SOCKET_MSG_EVENT_PRINT;
   n = send(sockfd, command_buffer, 1, 0);
   if (n != 1)
-    print_and_exit("ERROR: Command send failed\n");
+    print_and_exit("\nERROR: Command send failed\n");
 
-  printf("Connected\n");
+  printf(" - connected\n");
 
   return sockfd;
 }
@@ -111,32 +147,8 @@ int xscope_ep_request_upload(int sockfd, unsigned int length, const unsigned cha
   int requestBufIndex = 0;
   int n = 0;
 
-  if(xscope_ep_upload_pending)
+  if (xscope_ep_upload_pending == 1)
     return XSCOPE_EP_FAILURE;
-	
-  requestBuffer[requestBufIndex] = request;
-  requestBufIndex += 1;
-  *(unsigned int *)&requestBuffer[requestBufIndex] = length;
-  requestBufIndex += 4;
-  memcpy(&requestBuffer[requestBufIndex], data, length);
-  requestBufIndex += length;
-  
-  n = send(sockfd, requestBuffer, requestBufIndex, 0);
-  if (n != requestBufIndex)
-    print_and_exit("ERROR: Command send failed\n");
-
-  xscope_ep_upload_pending++;
-  free(requestBuffer);
-
-  return XSCOPE_EP_SUCCESS;
-}
-
-int xscope_ep_data_upload(int sockfd, unsigned int length, const unsigned char *data)
-{
-  char request = XSCOPE_SOCKET_MSG_EVENT_TARGET_DATA;
-  char *requestBuffer = (char *)malloc(sizeof(char)+sizeof(int)+length);
-  int requestBufIndex = 0;
-  int n = 0;
 
   requestBuffer[requestBufIndex] = request;
   requestBufIndex += 1;
@@ -144,16 +156,17 @@ int xscope_ep_data_upload(int sockfd, unsigned int length, const unsigned char *
   requestBufIndex += 4;
   memcpy(&requestBuffer[requestBufIndex], data, length);
   requestBufIndex += length;
-  printf("request:%c,length:%d,size:%d\n",request,length,requestBufIndex);
+
   n = send(sockfd, requestBuffer, requestBufIndex, 0);
   if (n != requestBufIndex)
     print_and_exit("ERROR: Command send failed\n");
 
+  xscope_ep_upload_pending = 1;
   free(requestBuffer);
 
   return XSCOPE_EP_SUCCESS;
-	
 }
+
 /*
  * Function to handle all data being received on the socket. It handles the
  * fact that full messages may not be received together and therefore needs
@@ -230,10 +243,12 @@ void handle_socket(int sockfd)
               if (g_prompt != NULL)
                 printf("%s", g_prompt);
 
-              // Because there is no newline character we need to explictly flush
-              fflush(stdout);
               new_line = 1;
             }
+
+            // Because there is no newline character at the end of the prompt and there
+            // may be none at the end of the string then we need to flush explicitly
+            fflush(stdout);
 
             // Restore the end character
             recv_buffer[string_end] = tmp;
@@ -245,6 +260,7 @@ void handle_socket(int sockfd)
       } else if (recv_buffer[i] == XSCOPE_SOCKET_MSG_EVENT_DATA) {
         // Data has been received, put it into the pcap file
         if ((i + DATA_EVENT_HEADER_BYTES) <= n) {
+          int xscope_probe = recv_buffer[i+1];
           int packet_len = EXTRACT_UINT(recv_buffer, i + 4);
 
           // Fixed-length data packets are encoded with a length of 0
@@ -259,7 +275,7 @@ void handle_socket(int sockfd)
             // An entire packet has been received - write it to the file
             total_bytes += packet_len;
 
-            hook_data_received(&recv_buffer[data_start], packet_len);
+            hook_data_received(xscope_probe, &recv_buffer[data_start], packet_len);
             increment = packet_len + DATA_EVENT_BYTES;
           }
         }
@@ -267,13 +283,12 @@ void handle_socket(int sockfd)
       } else if (recv_buffer[i] == XSCOPE_SOCKET_MSG_EVENT_TARGET_DATA) {
         // The target acknowledges that it has received the message sent
         if ((i + TARGET_DATA_EVENT_BYTES) <= n) {
-		  //assert(xscope_ep_upload_pending > 0);
-          //xscope_ep_upload_pending = 0;//--;
+          xscope_ep_upload_pending = 0;
           increment = TARGET_DATA_EVENT_BYTES;
         }
 
       } else {
-        print_and_exit("ERROR: Message format corrupted (received %u)\n", recv_buffer[0]);
+        print_and_exit("ERROR: Message format corrupted (received %u)\n", recv_buffer[i]);
       }
 
       if (increment) {
@@ -291,49 +306,5 @@ void handle_socket(int sockfd)
       }
     }
   }
-}
-
-void emit_pcap_header(FILE *f)
-{
-  pcap_hdr_t header = {
-    0xA1B2C3D4,             // Byte-Order Magic
-    0x2,                    // Major Version
-    0x4,                    // Minor Version
-    0x0,                    // Time zone (GMT)
-    0x0,                    // Accuracy - simply set 0
-    CAPTURE_LENGTH,         // Snaplength
-    DATA_LINK_ETHERNET,     // Data link type
-  };
-  fwrite(&header, sizeof(header), 1, f);
-}
-
-void emit_pcapng_section_header_block(FILE *f)
-{
-  section_block_header_t header = {
-    0x0A0D0D0A,             // Block Type
-    32,                     // Block Total Length
-    0x1A2B3C4D,             // Byte-Order Magic
-    0x1,                    // Major Version
-    0x0,                    // Minor Version
-    0xffffffffffffffffull,  // Section Length
-    0x0,                    // Options
-    32                      // Block Total Length
-  };
-  fwrite(&header, sizeof(header), 1, f);
-}
-
-void emit_pcapng_interface_description_block(FILE *f)
-{
-  interface_description_block_t iface = {
-    0x1,                                    // Block Type
-    sizeof(interface_description_block_t),  // Block Total Length
-    0x1,                                    // LinkType - LINKTYPE_ETHERNET
-    0x0,                                    // Reserved
-    CAPTURE_LENGTH,                         // SnapLen
-    // Options
-    { 0x09, 0x01, 0x08 },                       // if_tsresol (10^-8)
-    sizeof(interface_description_block_t)   // Block Total Length
-  };
-  fwrite(&iface, sizeof(iface), 1, f);
 }
 
